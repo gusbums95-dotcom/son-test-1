@@ -413,18 +413,33 @@ const MOOD_RECS = {
 // ═══════════════════════════════════════════════════
 // AUDIO ENGINE
 // ═══════════════════════════════════════════════════
-let audioCtx = null, masterGain = null;
+// 1) 페이지 로드 시 AudioContext 미리 생성 (iOS: suspended 상태로 시작됨)
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const masterGain = audioCtx.createGain();
+masterGain.gain.value = 1;
+masterGain.connect(audioCtx.destination);
+
 const activeSounds = {}; // id -> {gainNode, audio?, nodes?, volume, type}
 let masterPlaying = true;
 let _noiseBuffer = null;
+let alarmBuffer = null; // 미리 디코딩된 알람 오디오 버퍼
+
+// 2/3) 사용자 제스처 시 AudioContext 활성화 + 알람음 미리 디코딩
+async function resumeCtxAndLoadAlarm() {
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
+  // 알람 버퍼가 없으면 fetch → decode (resume 직후에만 동작)
+  if (!alarmBuffer) {
+    try {
+      const res = await fetch('알림음(싱잉볼 긴거)_trimmed.mp3');
+      const arrayBuf = await res.arrayBuffer();
+      alarmBuffer = await audioCtx.decodeAudioData(arrayBuf);
+    } catch(e) {}
+  }
+}
 
 function ensureCtx() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = 1;
-    masterGain.connect(audioCtx.destination);
-  }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
 }
@@ -700,7 +715,6 @@ function runPhase() {
 // ═══════════════════════════════════════════════════
 const CIRCUMFERENCE = 2 * Math.PI * 104; // ≈ 653.45
 let tState = { total:600, remaining:600, running:false, ivl:null };
-let timerAudio = null;
 
 function setDuration(min, btn) {
   if (tState.running) return;
@@ -718,8 +732,9 @@ function updateTimerUI() {
   ring.style.strokeDashoffset = CIRCUMFERENCE * (1 - pct);
 }
 
-function toggleTimer() {
-  ensureCtx(); // iOS unlock
+async function toggleTimer() {
+  // 2/3) 시작·재개 버튼 클릭 시 AudioContext 활성화 + 알람음 로드
+  await resumeCtxAndLoadAlarm();
   if (tState.running) {
     tState.running = false; clearInterval(tState.ivl);
     document.getElementById('timer-btn').textContent = '재개';
@@ -754,11 +769,14 @@ function timerDone() {
   document.getElementById('timer-status').textContent = '수련 완료 🎉';
   document.getElementById('timer-btn').textContent = '다시 시작';
   document.getElementById('timer-reset-btn').style.display = 'inline-block';
-  try {
-    if (!timerAudio) timerAudio = new Audio('알림음(싱잉볼 긴거)_trimmed.mp3');
-    timerAudio.currentTime = 0;
-    timerAudio.play().catch(() => {});
-  } catch(e) {}
+  // 4/5) 이미 활성화된 AudioContext로 알람음 즉시 재생 (한 번 재생 후 자동 종료)
+  if (alarmBuffer && audioCtx.state === 'running') {
+    const src = audioCtx.createBufferSource();
+    src.buffer = alarmBuffer;
+    src.loop = false;
+    src.connect(audioCtx.destination);
+    src.start();
+  }
 }
 
 // ═══════════════════════════════════════════════════
@@ -807,9 +825,9 @@ renderSounds();
 initHome();
 updateTimerUI();
 
-// iOS: unlock AudioContext on first touch
+// iOS: 소리 믹서 등 다른 터치에도 AudioContext 유지
 document.addEventListener('touchstart', () => {
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
 }, { once: true, passive: true });
 
 // PWA
